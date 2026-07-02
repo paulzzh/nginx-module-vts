@@ -72,6 +72,12 @@ static ngx_conf_bitmask_t ngx_http_vhost_traffic_status_ignore_status_masks[] = 
 };
 
 static ngx_command_t ngx_http_vhost_traffic_status_commands[] = {
+    { ngx_string("vhost_traffic_status_server_key"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_vhost_traffic_status_loc_conf_t, server_key),
+      NULL },
 
     { ngx_string("vhost_traffic_status"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
@@ -1100,6 +1106,7 @@ ngx_http_vhost_traffic_status_merge_loc_conf(ngx_conf_t *cf, void *parent, void 
         }
     }
 
+    ngx_conf_merge_str_value(conf->server_key, prev->server_key, "");
     ngx_conf_merge_ptr_value(conf->shm_zone, prev->shm_zone, NULL);
     ngx_conf_merge_value(conf->enable, prev->enable, 1);
     ngx_conf_merge_value(conf->filter, prev->filter, 1);

@@ -79,7 +79,10 @@ ngx_http_vhost_traffic_status_find_name(ngx_http_request_t *r,
     cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
     vtscf = ngx_http_get_module_loc_conf(r, ngx_http_vhost_traffic_status_module);
 
-    if (vtscf->filter && vtscf->filter_host && r->headers_in.server.len) {
+    if (vtscf->server_key.len) {
+        /* set the key by host vhost_traffic_status_server_key */
+        *buf = vtscf->server_key;
+    } else if (vtscf->filter && vtscf->filter_host && r->headers_in.server.len) {
         /* set the key by host header */
         *buf = r->headers_in.server;
 

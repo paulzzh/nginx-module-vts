@@ -272,6 +272,7 @@ typedef struct {
 
 
 typedef struct {
+    ngx_str_t                               server_key;
     ngx_shm_zone_t                         *shm_zone;
     ngx_str_t                               shm_name;
     ngx_flag_t                              enable;
