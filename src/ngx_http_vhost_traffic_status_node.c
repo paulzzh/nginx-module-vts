@@ -10,6 +10,10 @@
 #include "ngx_http_vhost_traffic_status_node.h"
 
 
+static ngx_uint_t ngx_http_vhost_traffic_status_node_status_code_slot(
+    ngx_http_vhost_traffic_status_node_t *vtsn, ngx_uint_t status);
+
+
 ngx_int_t
 ngx_http_vhost_traffic_status_node_generate_key(ngx_pool_t *pool,
     ngx_str_t *buf, ngx_str_t *dst, unsigned type)
@@ -388,6 +392,24 @@ ngx_http_vhost_traffic_status_node_lookup(ngx_rbtree_t *rbtree, ngx_str_t *key,
 }
 
 
+/* the status code counters are a slab allocation of their own */
+
+void
+ngx_http_vhost_traffic_status_node_free(ngx_slab_pool_t *shpool,
+    ngx_rbtree_node_t *node)
+{
+    ngx_http_vhost_traffic_status_node_t  *vtsn;
+
+    vtsn = (ngx_http_vhost_traffic_status_node_t *) &node->color;
+
+    if (vtsn->stat_status_code_counter != NULL) {
+        ngx_slab_free_locked(shpool, (void *) vtsn->stat_status_code_counter);
+    }
+
+    ngx_slab_free_locked(shpool, node);
+}
+
+
 void
 ngx_http_vhost_traffic_status_node_zero(ngx_http_vhost_traffic_status_node_t *vtsn)
 {
@@ -418,8 +440,14 @@ ngx_http_vhost_traffic_status_node_zero(ngx_http_vhost_traffic_status_node_t *vt
     vtsn->stat_request_time_counter_oc = 0;
     vtsn->stat_response_time_counter_oc = 0;
 
-    for (i = 0; i < vtsn->stat_status_code_length; i++) {
-        vtsn->stat_status_code_counter[i] = 0;
+    /*
+     * slot 0 counts the codes that are not measured, so there is one
+     * counter more than stat_status_code_length
+     */
+    if (vtsn->stat_status_code_counter != NULL) {
+        for (i = 0; i <= vtsn->stat_status_code_length; i++) {
+            vtsn->stat_status_code_counter[i] = 0;
+        }
     }
 
 #if (NGX_HTTP_CACHE)
@@ -450,8 +478,7 @@ ngx_http_vhost_traffic_status_node_zero(ngx_http_vhost_traffic_status_node_t *vt
 */
 void
 ngx_http_vhost_traffic_status_node_init(ngx_http_request_t *r,
-    ngx_http_vhost_traffic_status_node_t *vtsn, ngx_int_t status_code_slot,
-    ngx_http_upstream_state_t *state)
+    ngx_http_vhost_traffic_status_node_t *vtsn, ngx_http_upstream_state_t *state)
 {
     ngx_msec_int_t  ms;
 
@@ -471,7 +498,7 @@ ngx_http_vhost_traffic_status_node_init(ngx_http_request_t *r,
     /* set serverZone */
     ms = ngx_http_vhost_traffic_status_request_time(r);
 
-    ngx_http_vhost_traffic_status_node_update(r, vtsn, ms, status_code_slot, state);
+    ngx_http_vhost_traffic_status_node_update(r, vtsn, ms, state);
 }
 
 
@@ -481,8 +508,7 @@ ngx_http_vhost_traffic_status_node_init(ngx_http_request_t *r,
 */
 void
 ngx_http_vhost_traffic_status_node_set(ngx_http_request_t *r,
-    ngx_http_vhost_traffic_status_node_t *vtsn, ngx_int_t status_code_slot,
-    ngx_http_upstream_state_t *state)
+    ngx_http_vhost_traffic_status_node_t *vtsn, ngx_http_upstream_state_t *state)
 {
     ngx_msec_int_t                             ms;
     ngx_http_vhost_traffic_status_node_oc_t    ovtsn;
@@ -494,7 +520,7 @@ ngx_http_vhost_traffic_status_node_set(ngx_http_request_t *r,
 
     vtsn->ignore_status = vtscf->ignore_status;
     ms = ngx_http_vhost_traffic_status_request_time(r);
-    ngx_http_vhost_traffic_status_node_update(r, vtsn, ms, status_code_slot, state);
+    ngx_http_vhost_traffic_status_node_update(r, vtsn, ms, state);
 
     /*
      * stat_request_time is not kept up to date here: averaging the queue on
@@ -508,7 +534,7 @@ ngx_http_vhost_traffic_status_node_set(ngx_http_request_t *r,
 
 void
 ngx_http_vhost_traffic_status_node_update(ngx_http_request_t *r,
-    ngx_http_vhost_traffic_status_node_t *vtsn, ngx_msec_int_t ms, ngx_int_t status_code_slot,
+    ngx_http_vhost_traffic_status_node_t *vtsn, ngx_msec_int_t ms,
     ngx_http_upstream_state_t *state)
 {
     /*
@@ -542,9 +568,9 @@ ngx_http_vhost_traffic_status_node_update(ngx_http_request_t *r,
          * response, and nginx leaves that 0. add_rc() puts anything below 200
          * in the 1xx bucket, so it must not be handed one - the attempt would
          * be reported as an informational response. The two other places that
-         * read this status already say the same thing: shm_add_node() takes no
-         * status code slot outside 100..599, and the response time helper
-         * gives 0 for a state with no status.
+         * read this status already say the same thing: no node measures a
+         * status code outside 100..599, and the response time helper gives 0
+         * for a state with no status.
          *
          * It was still an attempt on this peer, so the counter above stands.
          */
@@ -554,8 +580,9 @@ ngx_http_vhost_traffic_status_node_update(ngx_http_request_t *r,
 
     ngx_http_vhost_traffic_status_add_rc(status, vtsn);
 
-    if (status_code_slot != -1 && vtsn->stat_status_code_counter != NULL ) {
-        vtsn->stat_status_code_counter[status_code_slot]++;
+    if (vtsn->stat_status_code_counter != NULL) {
+        vtsn->stat_status_code_counter[
+            ngx_http_vhost_traffic_status_node_status_code_slot(vtsn, status)]++;
     }
 
     if (state != NULL) {
@@ -799,12 +826,159 @@ ngx_http_vhost_traffic_status_node_time_queue_merge(
     (void) ngx_cpymem(a, &q, sizeof(q));
 }
 
-void ngx_http_vhost_traffic_status_status_code_merge(ngx_atomic_t *dst, ngx_atomic_t *src, ngx_uint_t n)
-{
-    ngx_uint_t i;
+/*
+ * A node's status code counters are followed by the codes they count, in
+ * the order the directive keeps them (ascending):
+ *
+ *     counter[0]          the codes the node does not measure
+ *     counter[1 .. n]     codes[0 .. n - 1]
+ *     codes[0 .. n - 1]   ngx_uint_t
+ *
+ * so that a node goes on counting by the codes it was made with when a
+ * reload measures others, as it goes on with the histogram buckets it was
+ * made with. Indexing by the codes of the configuration instead runs past
+ * the counters of a node made under a shorter list.
+ */
 
-    for (i = 0; i < n; i++) {
-        dst[i] += src[i];
+size_t
+ngx_http_vhost_traffic_status_status_codes_size(ngx_uint_t n)
+{
+    return sizeof(ngx_atomic_t) * (n + 1) + sizeof(ngx_uint_t) * n;
+}
+
+
+static ngx_uint_t *
+ngx_http_vhost_traffic_status_node_status_codes(
+    ngx_http_vhost_traffic_status_node_t *vtsn)
+{
+    return (ngx_uint_t *)
+           &vtsn->stat_status_code_counter[vtsn->stat_status_code_length + 1];
+}
+
+
+/* the index of code in codes, ascending, or -1 */
+
+static ngx_int_t
+ngx_http_vhost_traffic_status_status_code_find(ngx_uint_t *codes, ngx_uint_t n,
+    ngx_uint_t code)
+{
+    ngx_uint_t  lo, hi, mid;
+
+    lo = 0;
+    hi = n;
+
+    while (lo < hi) {
+        mid = lo + (hi - lo) / 2;
+
+        if (codes[mid] == code) {
+            return mid;
+        }
+
+        if (codes[mid] < code) {
+            lo = mid + 1;
+
+        } else {
+            hi = mid;
+        }
+    }
+
+    return -1;
+}
+
+
+/* counter is status_codes_size(measured->nelts) bytes, cleared */
+
+void
+ngx_http_vhost_traffic_status_node_status_codes_init(
+    ngx_http_vhost_traffic_status_node_t *vtsn, ngx_atomic_t *counter,
+    ngx_array_t *measured)
+{
+    vtsn->stat_status_code_counter = counter;
+    vtsn->stat_status_code_length = measured->nelts;
+
+    ngx_memcpy(ngx_http_vhost_traffic_status_node_status_codes(vtsn),
+               measured->elts, sizeof(ngx_uint_t) * measured->nelts);
+}
+
+
+/* the counter a response with status goes to: its own, or 0 */
+
+static ngx_uint_t
+ngx_http_vhost_traffic_status_node_status_code_slot(
+    ngx_http_vhost_traffic_status_node_t *vtsn, ngx_uint_t status)
+{
+    ngx_int_t  i;
+
+    i = ngx_http_vhost_traffic_status_status_code_find(
+            ngx_http_vhost_traffic_status_node_status_codes(vtsn),
+            vtsn->stat_status_code_length, status);
+
+    return (i == -1) ? 0 : (ngx_uint_t) i + 1;
+}
+
+
+/* what the node counted for code, 0 when it does not measure it */
+
+ngx_atomic_uint_t
+ngx_http_vhost_traffic_status_node_status_code_count(
+    ngx_http_vhost_traffic_status_node_t *vtsn, ngx_uint_t code)
+{
+    ngx_uint_t  slot;
+
+    slot = ngx_http_vhost_traffic_status_node_status_code_slot(vtsn, code);
+
+    return (slot == 0) ? 0 : vtsn->stat_status_code_counter[slot];
+}
+
+
+/*
+ * Its "other" as the configuration in force reads it: what the node counted
+ * as other, and what it counted for codes that are no longer measured.
+ */
+
+ngx_atomic_uint_t
+ngx_http_vhost_traffic_status_node_status_code_other(
+    ngx_http_vhost_traffic_status_node_t *vtsn, ngx_array_t *measured)
+{
+    ngx_uint_t          i, *codes;
+    ngx_atomic_uint_t   n;
+
+    codes = ngx_http_vhost_traffic_status_node_status_codes(vtsn);
+    n = vtsn->stat_status_code_counter[0];
+
+    for (i = 0; i < vtsn->stat_status_code_length; i++) {
+        if (ngx_http_vhost_traffic_status_status_code_find(measured->elts,
+                measured->nelts, codes[i]) == -1)
+        {
+            n += vtsn->stat_status_code_counter[i + 1];
+        }
+    }
+
+    return n;
+}
+
+
+/* dst counts the codes of measured, as the configuration in force reads src */
+
+void
+ngx_http_vhost_traffic_status_status_code_merge(
+    ngx_http_vhost_traffic_status_node_t *dst,
+    ngx_http_vhost_traffic_status_node_t *src, ngx_array_t *measured)
+{
+    ngx_uint_t  i, *codes;
+
+    if (dst->stat_status_code_counter == NULL) {
+        return;
+    }
+
+    codes = measured->elts;
+
+    dst->stat_status_code_counter[0] +=
+        ngx_http_vhost_traffic_status_node_status_code_other(src, measured);
+
+    for (i = 0; i < measured->nelts; i++) {
+        dst->stat_status_code_counter[i + 1] +=
+            ngx_http_vhost_traffic_status_node_status_code_count(src, codes[i]);
     }
 }
 
